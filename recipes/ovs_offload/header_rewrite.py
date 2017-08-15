@@ -71,8 +71,8 @@ def prepare_for_test():
 
     # arp responder for mac mod
     # TODO: use static arp?
-    ofctl_add_flow("priority=10, arp, nw_dst=8.9.10.11, nw_src=8.9.10.01, actions=load:0x2->NXM_OF_ARP_OP[], move:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[], mod_dl_src:aa:bb:cc:dd:ee:99, move:NXM_NX_ARP_SHA[]->NXM_NX_ARP_THA[], move:NXM_OF_ARP_SPA[]->NXM_OF_ARP_TPA[], load:0xaabbccddee99->NXM_NX_ARP_SHA[], load:0x08090a0b->NXM_OF_ARP_SPA[], in_port")
-    ofctl_add_flow("priority=10, arp, nw_dst=8.9.10.01, nw_src=8.9.10.11, actions=load:0x2->NXM_OF_ARP_OP[], move:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[], mod_dl_src:aa:bb:cc:dd:ee:99, move:NXM_NX_ARP_SHA[]->NXM_NX_ARP_THA[], move:NXM_OF_ARP_SPA[]->NXM_OF_ARP_TPA[], load:0xaabbccddee99->NXM_NX_ARP_SHA[], load:0x08090a01->NXM_OF_ARP_SPA[], in_port")
+    ofctl_add_flow("priority=10, arp, nw_dst=8.9.10.11, nw_src=8.9.10.1, actions=load:0x2->NXM_OF_ARP_OP[], move:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[], mod_dl_src:aa:bb:cc:dd:ee:99, move:NXM_NX_ARP_SHA[]->NXM_NX_ARP_THA[], move:NXM_OF_ARP_SPA[]->NXM_OF_ARP_TPA[], load:0xaabbccddee99->NXM_NX_ARP_SHA[], load:0x08090a0b->NXM_OF_ARP_SPA[], in_port")
+    ofctl_add_flow("priority=10, arp, nw_dst=8.9.10.1, nw_src=8.9.10.11, actions=load:0x2->NXM_OF_ARP_OP[], move:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[], mod_dl_src:aa:bb:cc:dd:ee:99, move:NXM_NX_ARP_SHA[]->NXM_NX_ARP_THA[], move:NXM_OF_ARP_SPA[]->NXM_OF_ARP_TPA[], load:0xaabbccddee99->NXM_NX_ARP_SHA[], load:0x08090a01->NXM_OF_ARP_SPA[], in_port")
 
     # neighbor for ipv4 mod
     nic1.get_host().run("ip -4 n replace %s dev %s lladdr %s" % ("8.9.10.55", nic1.get_devname(), nic2_mac), netns=nic1.get_netns())
@@ -83,7 +83,7 @@ def prepare_for_test():
     nic2.get_host().run("ip -6 n replace %s dev %s lladdr %s" % (nic1.get_ip(4), nic2.get_devname(), nic1_mac), netns=nic2.get_netns())
 
     # icmp + mod mac
-    ofctl_add_flow("priority=2, in_port=11, dl_dst=aa:bb:cc:dd:ee:99, ip, icmp, nw_dst=8.9.10.01, actions=mod_dl_src:aa:bb:cc:dd:ee:99, mod_dl_dst:%s, output:1" % nic1_mac)
+    ofctl_add_flow("priority=2, in_port=11, dl_dst=aa:bb:cc:dd:ee:99, ip, icmp, nw_dst=8.9.10.1, actions=mod_dl_src:aa:bb:cc:dd:ee:99, mod_dl_dst:%s, output:1" % nic1_mac)
     ofctl_add_flow("priority=2, in_port=1, dl_dst=aa:bb:cc:dd:ee:99, ip, icmp, nw_dst=8.9.10.11, actions=mod_dl_src:aa:bb:cc:dd:ee:99, mod_dl_dst:%s, output:11" % nic2_mac)
 
     # tcp + mod ipv4
