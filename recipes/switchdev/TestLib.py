@@ -7,6 +7,7 @@ published by the Free Software Foundation; see COPYING for details.
 __author__ = """
 jiri@mellanox.com (Jiri Pirko)
 idosch@mellanox.com (Ido Schimmel)
+petrm@mellanox.com (Petr Machata)
 """
 
 from time import sleep
@@ -106,7 +107,7 @@ class TestLib:
                                          "addr": if2.get_ip(1),
                                          "count": count,
                                          "interval": interval,
-                                         "iface" : if1.get_ip(1),
+                                         "iface" : if1.get_devname(),
                                          "limit_rate": limit_rate})
 
         if self._ipv in [ 'ipv6', 'both' ]:
@@ -201,75 +202,91 @@ class TestLib:
         }
         return self._ctl.get_module("Iperf", options = modules_options)
 
-    def iperf_mc(self, sender, listeners, bridged, mc_group, desc=None):
+    def iperf_mc_listen(self, listener, mc_group):
+        host = listener.get_host()
+        srv_m = self._get_iperf_srv_mod(mc_group)
+        proc = host.run(srv_m, bg=True, netns=listener.get_netns())
+        return proc
+
+    def _get_iperf_cli_mod_packets(self, mc_group, num, speed, size = 100):
+        modules_options = {
+            "role" : "client",
+            "iperf_server" : mc_group,
+            "duration" : 1,
+            "iperf_opts" : "-u -l %d -n %d -b %dmb -T 100" %
+                            (size, size * num, speed)
+        }
+        return self._ctl.get_module("Iperf", options = modules_options)
+
+    def iperf_mc(self, sender, recivers, mc_group, desc=None):
         if not desc:
-            desc = self._generate_default_desc(sender, listeners)
+            desc = self._generate_default_desc(sender, recivers)
 
         sender.set_mtu(self._mtu)
-        sender.enable_multicast()
-        map(lambda i:i.enable_multicast(), listeners + bridged)
-        map(lambda i:i.set_mtu(self._mtu), listeners + bridged)
+        map(lambda i:i.set_mtu(self._mtu), recivers)
 
         sender_host = sender.get_host()
-        listeners_host = map(lambda i:i.get_host(), listeners)
-        bridged_host = map(lambda i:i.get_host(), bridged)
+        recivers_host = map(lambda i:i.get_host(), recivers)
 
         map(lambda i:i.sync_resources(modules=["Iperf"]),
-            listeners_host + bridged_host)
+            recivers_host)
 
         duration = self._netperf_duration
         speed = self._mc_speed
 
         # read link-stats
-        sender_stats = sender.link_stats()
-        listeners_stats = map(lambda i:i.link_stats(), listeners)
-        bridged_stats = map(lambda i:i.link_stats(), bridged)
-
-        # Run iperf server for all listeners
-        srv_m = self._get_iperf_srv_mod(mc_group)
-        s_procs = map(lambda i:i[0].run(srv_m, bg=True, netns=i[1].get_netns()),
-                      zip(listeners_host, listeners))
-        self._ctl.wait(2)
+        sender_stats_before = sender.link_stats()
+        recivers_stats_before = map(lambda i:i.link_stats(), recivers)
 
         # An send traffic to all listeners but bridged
         cli_m = self._get_iperf_cli_mod(mc_group, duration, speed)
         sender_host.run(cli_m, timeout=duration + 10, desc=desc,
                         netns=sender.get_netns())
-        map(lambda i:i.intr(), s_procs)
-        map(lambda i:i.disable_multicast(), listeners + bridged)
-        sender.disable_multicast()
 
         # re-read link-stats
-        sender_stats1 = sender.link_stats()
-        listeners_stats1 = map(lambda i:i.link_stats(), listeners)
-        bridged_stats1 = map(lambda i:i.link_stats(), bridged)
+        sender_stats_after = sender.link_stats()
+        recivers_stats_after = map(lambda i:i.link_stats(), recivers)
 
-        # Check that listeners got multi cast traffic
-        tx = sender_stats1["tx_bytes"] - sender_stats["tx_bytes"]
-        rx = map(lambda i:i[1]["rx_bytes"] - i[0]["rx_bytes"],
-                 zip(listeners_stats, listeners_stats1))
-        err = filter(lambda i:i[0] < self._mc_high_thershold, zip(rx, listeners))
-        err_str = map(lambda i:("Traffic isn't received for %s:%s count %d" %
-                               (i[1].get_host().get_id(), i[1].get_id(), i[0]),
-                               i[1]), err)
-        for i in err_str:
-            self.custom(i[1].get_host(), "iperf_mc", i[0])
-        for i in zip(rx, listeners):
+        # Check that who got multi cast traffic
+        tx = sender_stats_after["tx_bytes"] - sender_stats_before["tx_bytes"]
+        rx = map(lambda i,l:i["rx_bytes"] - l["rx_bytes"],
+                 recivers_stats_after, recivers_stats_before)
+        recivers_result = [rate > self._mc_high_thershold for rate in rx]
+        for i in zip(rx, recivers):
             logging.info("Measured traffic on %s:%s is %dMb, bytes lost %d (%d%%)" %
                          (i[1].get_host().get_id(), i[1].get_id(),
                           i[0] / 1000000,
                           max(tx - i[0], 0),
                           (max(tx - i[0], 0) * 100) / tx))
+        return recivers_result
 
-        # Check that only listeners got traffic
-        rx = map(lambda i:i[1]["rx_bytes"] - i[0]["rx_bytes"],
-                 zip(bridged_stats, bridged_stats1))
-        err = filter(lambda i:i[0] > self._mc_low_thershold, zip(rx, bridged))
-        err_str = map(lambda i:("Received unwanted traffic for %s:%s count %d" %
-                               (i[1].get_host().get_id(), i[1].get_id(), i[0]),
-                               i[1]), err)
-        for i in err_str:
-            self.custom(i[1].get_host(), "iperf_mc", i[0])
+    def mc_ipref_compare_result(self, ifaces, results, expected):
+        err_indices = [i for i in range(len(results))
+                       if results[i] != expected[i]]
+        for i in err_indices:
+            iface, result, expect = ifaces[i], results[i], expected[i]
+            err_str = "interface %s in %s %s traffic, when it %s get" % \
+                  (iface.get_id(), iface.get_host().get_id(), \
+                   ["didn't get", "got"][result], \
+                   ["shouldn't", "should"][expect])
+            self.custom(iface.get_host(), "iperf_mc", err_str)
+
+    def check_cpu_traffic(self, ifaces, thershold = 100, test = True):
+        err = False
+        for iface in ifaces:
+            stats = iface.link_cpu_ifstat()
+            if not test:
+                continue
+
+            # Check tx only, since in rx case it is hard to distinguish between
+            # offloading error and "legal" cpu traps.
+            if stats["tx_packets"] > thershold:
+                err = True
+                self.custom(iface.get_host(),  "cpu traffic",
+                            "%s sent too much data (%d packets)" % \
+                            (stats["devname"], stats["tx_packets"]))
+        if not err:
+            self.custom(iface.get_host(),  "cpu traffic", "")
 
     def pktgen(self, if1, if2, pkt_size, desc=None, thread_option=[], **kwargs):
         if1.set_mtu(self._mtu)
@@ -316,20 +333,29 @@ class TestLib:
         custom_mod = self._ctl.get_module("Custom", options=options)
         m1.run(custom_mod, desc=desc)
 
-    def check_fdb(self, iface, hwaddr, vlan_id, rec_type, find=True):
+    def check_fdb(self, iface, hwaddr, vlan_id, offload, extern_learn, find=True):
         fdb_table = iface.get_br_fdbs()
 
-        rec = "offload" if rec_type == "software" else "self"
         found = False
+        err_arg = None
         for fdb in fdb_table:
-            if (fdb["hwaddr"] == str(hwaddr) and fdb["vlan_id"] == vlan_id and
-                fdb[rec]):
-                found = True
+            if not (fdb["hwaddr"] == str(hwaddr) and fdb["vlan_id"] == vlan_id):
+                continue
+            if (offload and not fdb["offload"]):
+                err_arg = "offload"
+                continue
+            if (extern_learn and not fdb["extern_learn"]):
+                err_arg = "extern_learn"
+                continue
+            found = True
 
         if found and not find:
-            err_msg = "found %s record when shouldn't" % rec_type
+            if err_arg is None:
+                err_msg = "didn't find record when should've"
+            else:
+                err_msg = "found %s record when shouldn't" % err_arg
         elif find and not found:
-            err_msg = "didn't find %s record when should've" % rec_type
+            err_msg = "didn't find %s record when should've" % err_arg
         else:
             err_msg = ""
 
@@ -470,6 +496,33 @@ class TestLib:
 
         return self.custom(iface.get_host(), desc, err_msg)
 
+    def expect_mr_notif(self, sw, notif_type, source_ip = None,
+                        source_vif = None, group_ip = None, none_ok = False):
+        notif = sw.mroute_get_notif()
+        if notif == {}:
+            if not none_ok:
+                self.custom(sw, "mr_notif", \
+                            "No mroute notification - the packet did not arrive to the kernel")
+            return None
+
+        if notif["notif_type"] != notif_type:
+            self.custom(sw, "mr_notif",
+                        "Got notification of wrong type %d != %d" % \
+                            (notif_type, notif["notif_type"]))
+        if source_ip and notif["source_ip"] != str(source_ip):
+            self.custom(sw, "mr_notif",
+                        "Got notification with wrong source IP '%s' != '%s'" %
+                        (source_ip, notif["source_ip"]))
+        if group_ip and notif["group_ip"] != str(group_ip):
+            self.custom(sw, "mr_notif",
+                        "Got notification with wrong group IP %s != %s" %
+                        (group_ip, notif["group_ip"]))
+        if source_vif and notif["source_vif"] != source_vif:
+            self.custom(sw, "mr_notif",
+                        "Got notification with wrong source VIF: %d != %d" % \
+                            (source_vif, notif["source_vif"]))
+        return notif
+
 class Qdisc:
     def __init__(self, iface, handle, qdisc):
         self._ifname = iface.get_devname()
@@ -488,3 +541,154 @@ class Qdisc:
 
     def run(self, command):
         self._machine.run(command)
+
+class vrf:
+    """A context manager that creates a VRF on enter, and destroys it on exit.
+    Returns a string name of the newly-allocated VRF. Use with a ``with``
+    statement::
+
+        with vrf(machine) as v:
+            # Do stuff with v.
+            pass
+    """
+
+    counter = iter(range(1000))
+    def __init__(self, sw):
+        """Args:
+            sw: The machine to create the VRF on.
+        """
+        self._id = self.__class__.counter.next()
+        self._sw = sw
+
+    def _dev(self):
+        return "vrf%d" % self._id
+
+    def __enter__(self):
+        tab = 1000 + self._id
+        self._sw.run("ip l add name %s type vrf table %d" % (self._dev(), tab))
+        self._sw.run("ip l set dev %s up" % self._dev())
+        return self._dev()
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._sw.run("ip l del dev %s" % self._dev())
+
+class dummy:
+    """A context manager that creates a dummy device on enter, and destroys it on
+    exit. Returns the dummy device created. Use with a ``with`` statement::
+
+        with dummy(machine) as d:
+            # Do stuff with d.
+            pass
+    """
+
+    def __init__(self, sw, vrf_name=None, **kwargs):
+        """Args:
+            sw: The machine to create the dummy on.
+            vrf_name: (Optional) name of VRF to put this device in.
+            **kwargs: Arbitrary arguments that are passed to sw.create_dummy.
+        """
+        self._sw = sw
+        self._vrf_name = vrf_name
+        self._d_opts = kwargs
+        self._d = None
+
+    def _ulfwdroute(self, op):
+        self._sw.run("ip r %s tab %d 1.2.3.5/32 via %s"
+               % (op, self._vrf_u_tab, ipv4(test_ip(99, 2, []))))
+
+    def __enter__(self):
+        self._d = self._sw.create_dummy(**self._d_opts)
+        if self._vrf_name is not None:
+            self._sw.run("ip l set dev %s master %s"
+                         % (self._d.get_devname(), self._vrf_name))
+        return self._d
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self._d is not None:
+            self._d.destroy()
+
+class tunnel:
+    """A base class for context managers that create tunnel devices on enter, and
+    destroy them on exit. Returns the netdevice created. Use with a ``with``
+    statement::
+
+        with sometunnel(machine, bound) as t:
+            # Do stuff with t.
+            pass
+    """
+
+    def __init__(self, sw, d, vrf_name=None, **kwargs):
+        """Args:
+            sw: The machine to create the tunnel on.
+            d: A bound device of the tunnel. May be ``None``.
+            vrf_name: (Optional) name of VRF to put this device in.
+            **kwargs: Arbitrary arguments that are passed to the function that
+                creates the tunnel in question, as documented at subclasses.
+        """
+        self._sw = sw
+        self._d = d
+        self._vrf_name = vrf_name
+        self._opts = kwargs
+
+        self._dev = None
+
+    def _create(self, ul_iface, ip, opts):
+        raise NotImplementedError()
+
+    def __enter__(self):
+        self._dev = self._create(self._d, self._opts)
+        if self._vrf_name is not None:
+            self._sw.run("ip link set dev %s vrf %s"
+                         % (self._dev.get_devname(), self._vrf_name))
+
+        return self._dev
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self._dev is not None:
+            if self._d is not None:
+                self._dev.slave_del(self._d.get_id())
+            self._dev.destroy()
+
+class gre(tunnel):
+    """A context manager that creates a GRE netdevice on enter and destroys it on
+    exit. See ``tunnel`` for more details. This calls ``Task.create_gre`` to
+    actually create the tunnel."""
+    def _create(self, ul_iface, opts):
+        return self._sw.create_gre(ul_iface=ul_iface, **opts)
+
+class ipip(tunnel):
+    """A context manager that creates an IPIP netdevice on enter and destroys it on
+    exit. See ``tunnel`` for more details. This calls ``Task.create_ipip`` to
+    actually create the tunnel."""
+    def _create(self, ul_iface, opts):
+        return self._sw.create_ipip(ul_iface=ul_iface, **opts)
+
+class route:
+    """A context manager that inserts a route on enter and removes it on exit. Use
+    with a ``with`` statement::
+
+        with route(machine, vrf, "192.168.2.0/24 via 192.168.1.1"):
+            # Test that the router behaves as expected.
+            pass
+    """
+
+    def __init__(self, sw, vrf_name, route):
+        """Args:
+            sw: The machine to create the tunnel on.
+            vrf_name: Name of VRF to put this device in. May be ``None``.
+            route: The route to add.
+        """
+        self._sw = sw
+        self._vrf = vrf_name
+        self._route = route
+
+    def do(self, op):
+        vrf_arg = " vrf " + self._vrf if self._vrf is not None else ""
+        self._sw.run("ip route %s%s %s" % (op, vrf_arg, self._route))
+
+    def __enter__(self):
+        self.do("add")
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.do("del")

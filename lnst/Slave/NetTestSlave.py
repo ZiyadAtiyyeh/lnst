@@ -20,6 +20,7 @@ import socket
 import ctypes
 import multiprocessing
 import re
+import struct
 from time import sleep, time
 from xmlrpclib import Binary
 from tempfile import NamedTemporaryFile
@@ -37,6 +38,7 @@ from lnst.Common.ConnectionHandler import send_data
 from lnst.Common.ConnectionHandler import ConnectionHandler
 from lnst.Common.Config import lnst_config
 from lnst.Common.Config import DefaultRPCPort
+from lnst.Common.Consts import MROUTE
 from lnst.Slave.InterfaceManager import InterfaceManager
 from lnst.Slave.BridgeTool import BridgeTool
 from lnst.Slave.SlaveSecSocket import SlaveSecSocket, SecSocketException
@@ -59,6 +61,7 @@ class SlaveMethods:
         self._copy_targets = {}
         self._copy_sources = {}
         self._system_config = {}
+        self.mroute_sockets = {}
 
         self._cache = ResourceCache(lnst_config.get_option("cache", "dir"),
                         lnst_config.get_option("cache", "expiration_period"))
@@ -193,6 +196,13 @@ class SlaveMethods:
         if dev is None:
             return {}
         return dev.get_if_data()
+
+    def link_cpu_ifstat(self, if_id):
+        dev = self._if_manager.get_mapped_device(if_id)
+        if dev is None:
+            logging.error("Device with id '%s' not found." % if_id)
+            return {}
+        return dev.link_cpu_ifstat()
 
     def link_stats(self, if_id):
         dev = self._if_manager.get_mapped_device(if_id)
@@ -528,6 +538,11 @@ class SlaveMethods:
         logging.info("Performing machine cleanup.")
         self._command_context.cleanup()
 
+        for mroute_soc in self.mroute_sockets.values():
+            mroute_soc.close()
+            del mroute_soc
+        self.mroute_sockets = {}
+
         self.restore_system_config()
 
         devs = self._if_manager.get_mapped_devices()
@@ -766,7 +781,8 @@ class SlaveMethods:
         dc_routes = []
         nh_routes = []
         ip_re = "\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"
-        prefix_re = "^(" + ip_re + "(?:/\d{1,3})?)"
+        ip6_re = "(?:(?:[\da-f]{1,4}:)*|:)(?::|(?:[\da-f]{1,4})|(?::[\da-f]{1,4})*)"
+        prefix_re = "^((?:local )?" + "(?:%s|%s)" % (ip_re, ip6_re) + "(?:/\d{1,3})?)"
 
         # parse directly connected routes
         dc_route_re = prefix_re + " dev (\w+) (.*)"
@@ -786,10 +802,10 @@ class SlaveMethods:
         for nh_route_match in nh_route_matchs:
             nexthop = { "ip" : nh_route_match[1],
                         "dev" : nh_route_match[2],
-                        "flags" : ""}
+                        "flags" : nh_route_match[3]}
             nh_route = {"prefix"  : nh_route_match[0],
                         "nexthops": [ nexthop ],
-                        "flags"   : nh_route_match[3] }
+                        "flags" : ""}
             nh_routes.append(nh_route)
 
         # parse ECMP routes
@@ -937,6 +953,24 @@ class SlaveMethods:
         brt.set_state(br_state_info)
         return True
 
+    def set_br_mcast_snooping(self, if_id, set_on = True):
+        dev = self._if_manager.get_mapped_device(if_id)
+        if not dev:
+            logging.error("Device with id '%s' not found." % if_id)
+            return False
+        brt = BridgeTool(dev.get_name())
+        brt.set_mcast_snooping(set_on)
+        return True
+
+    def set_br_mcast_querier(self, if_id, set_on = True):
+        dev = self._if_manager.get_mapped_device(if_id)
+        if not dev:
+            logging.error("Device with id '%s' not found." % if_id)
+            return False
+        brt = BridgeTool(dev.get_name())
+        brt.set_mcast_querier(set_on)
+        return True
+
     def set_speed(self, if_id, speed):
         dev = self._if_manager.get_mapped_device(if_id)
         if dev is not None:
@@ -981,8 +1015,7 @@ class SlaveMethods:
         stdout, _ = exec_cmd("pidof systemd", die_on_err=False)
         return len(stdout) != 0
 
-    def _configure_service(self, service, start=True):
-        action = "start" if start else "stop"
+    def _configure_service(self, service, action):
         if self._is_systemd():
             exec_cmd("systemctl {} {}".format(action, service))
         else:
@@ -990,10 +1023,13 @@ class SlaveMethods:
         return True
 
     def enable_service(self, service):
-        return self._configure_service(service)
+        return self._configure_service(service, "start")
 
     def disable_service(self, service):
-        return self._configure_service(service, start=False)
+        return self._configure_service(service, "stop")
+
+    def restart_service(self, service):
+        return self._configure_service(service, "restart")
 
     def get_num_cpus(self):
         return int(os.sysconf('SC_NPROCESSORS_ONLN'))
@@ -1030,6 +1066,162 @@ class SlaveMethods:
             logging.error("Device with id '%s' not found." % if_id)
             return False
         return True
+
+    def set_mcast_flood(self, if_id, on):
+        dev = self._if_manager.get_mapped_device(if_id)
+        if dev is not None:
+            dev.set_mcast_flood(on)
+        else:
+            logging.error("Device with id '%s' not found." % if_id)
+            return False
+        return True
+
+    def set_mcast_router(self, if_id, state):
+        dev = self._if_manager.get_mapped_device(if_id)
+        if dev is not None:
+            dev.set_mcast_router(state)
+        else:
+            logging.error("Device with id '%s' not found." % if_id)
+            return False
+        return True
+
+    def mroute_operation(self, op_type, op, table_id):
+        if not self.mroute_sockets.has_key(table_id):
+            logging.error("mroute %s table was not init", table_id)
+            return False
+        try:
+            self.mroute_sockets[table_id].setsockopt(socket.IPPROTO_IP,
+                                                     op_type, op)
+        except Exception as e:
+           raise Exception("mroute operation failed")
+        return True
+
+    def mroute_init(self, table_id):
+        logging.debug("Initializing mroute socket")
+        if not self.mroute_sockets.has_key(table_id):
+            self.mroute_sockets[table_id] = socket.socket(socket.AF_INET,
+                                                          socket.SOCK_RAW,
+                                                          socket.IPPROTO_IGMP)
+        self.mroute_sockets[table_id].settimeout(0.5)
+        init_struct = struct.pack("I", MROUTE.INIT)
+        res = self.mroute_operation(MROUTE.INIT, init_struct, table_id)
+        return res
+
+    def mroute_finish(self, table_id):
+        logging.debug("Closing mroute socket")
+        finish_struct = struct.pack("I", MROUTE.FINISH)
+        res = self.mroute_operation(MROUTE.FINISH, finish_struct, table_id)
+        return res
+
+    def mroute_pim_init(self, table_id, pim_stop=False):
+        logging.debug("Initializing mroute PIM")
+        pim_struct = struct.pack("I", not pim_stop)
+        return self.mroute_operation(MROUTE.PIM_INIT, pim_struct, table_id)
+
+    def mroute_table(self, index):
+        logging.debug("Creating mroute table %d" % index)
+
+        self.mroute_sockets[index] = socket.socket(socket.AF_INET,
+                                                   socket.SOCK_RAW,
+                                                   socket.IPPROTO_IGMP)
+        table_struct = struct.pack("I", index)
+        return self.mroute_operation(MROUTE.TABLE, table_struct, index)
+
+    def mroute_add_vif(self, if_id, vif_id, table_id):
+        logging.debug("Adding mroute VIF index %d" % vif_id)
+
+        dev = self._if_manager.get_mapped_device(if_id)
+        if dev is None:
+            logging.error("Device with id '%s' not found." % if_id)
+            return False
+
+        if_index = dev.get_if_index()
+        vif_struct = struct.pack("HBBIII", vif_id, MROUTE.USE_IF_INDEX,
+                                 MROUTE.DEFAULT_TTL, 0, if_index, 0)
+        return self.mroute_operation(MROUTE.VIF_ADD, vif_struct, table_id)
+
+    def mroute_del_vif(self, if_id, vif_id, table_id):
+        logging.debug("Deleting mroute VIF index %d" % vif_id)
+        vif_struct = struct.pack("HBBIII", vif_id, 0,0, 0, 0, 0)
+        return self.mroute_operation(MROUTE.VIF_DEL, vif_struct, table_id)
+
+    def mroute_add_vif_reg(self, vif_id, table_id):
+        logging.debug("Adding mroute pimreg VIF with index %d" % vif_id)
+        vif_struct = struct.pack("HBBIII", vif_id, MROUTE.REGISET_VIF,
+                                 MROUTE.DEFAULT_TTL, 0, 0, 0)
+        return self.mroute_operation(MROUTE.VIF_ADD, vif_struct, table_id)
+
+    def mroute_add_mfc(self, source, group, source_vif, out_vifs,
+                       table_id, proxi = False):
+        logging.debug("Adding mroute MFC route (%s, %s) -> %s" %
+                      (source, group, str(out_vifs)))
+
+        ttls = [0] * MROUTE.MAX_VIF
+        for vif, ttl in out_vifs.items():
+            if vif >= MROUTE.MAX_VIF:
+                logging.error("ilegal VIF was asked")
+                return False
+            ttls[vif] = ttl
+
+        mfc_struct = socket.inet_aton(source) + socket.inet_aton(group) + \
+                     struct.pack("H32B", source_vif, *ttls) + \
+                     struct.pack("IIIIH", 0,0,0,0,0)
+
+        op_type = MROUTE.MFC_ADD if not proxi else MROUTE.MFC_ADD_PROXI
+        return self.mroute_operation(op_type, mfc_struct, table_id)
+
+    def mroute_del_mfc(self, source, group, source_vif, table_id,
+                       proxi = False):
+        logging.debug("Deleting mroute MFC route (%s, %s)" % (source, group))
+
+        ttls = [0] * MROUTE.MAX_VIF
+        mfc_struct = socket.inet_aton(source) + socket.inet_aton(group) + \
+                     struct.pack("H32B", source_vif, *ttls) + \
+                     struct.pack("IIIIH",0, 0,0,0,0)
+
+        op_type = MROUTE.MFC_DEL if not proxi else MROUTE.MFC_DEL_PROXI
+        return self.mroute_operation(op_type, mfc_struct, table_id)
+
+    def mroute_get_notif(self, table_id):
+        if not self.mroute_sockets.has_key(table_id):
+            logging.error("mroute table %s was not init", table_id)
+            return False
+        try:
+            notif = self.mroute_sockets[table_id].recv(65*1024)
+        except:
+            return {}
+
+        if len(notif) < 28:
+            raise Exception("notif of wrong size was capture")
+
+        notif_type, zero, source_vif = struct.unpack("BBB", notif[8:11])
+        res = {}
+        if zero != 0:
+            res = {"error": True}
+        res["notif_type"] = notif_type
+        res["source_vif"] = source_vif
+        res["source_ip"] = socket.inet_ntoa(notif[12:16])
+        res["group_ip"] = socket.inet_ntoa(notif[16:20])
+        res["raw"] = notif
+        res["data"] = notif[28:]
+        return res
+
+    def get_coalesce(self, if_id):
+        dev = self._if_manager.get_mapped_device(if_id)
+        if dev is not None:
+            return dev.get_coalesce()
+        else:
+            logging.error("Device with id '%s' not found." % if_id)
+            return None
+
+    def set_coalesce(self, if_id, cdata):
+        dev = self._if_manager.get_mapped_device(if_id)
+        if dev is not None:
+            dev.set_coalesce(cdata)
+            return True
+        else:
+            logging.error("Device with id '%s' not found." % if_id)
+            return False
 
 class ServerHandler(ConnectionHandler):
     def __init__(self, addr):

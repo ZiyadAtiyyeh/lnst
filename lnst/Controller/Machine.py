@@ -149,6 +149,47 @@ class Machine(object):
                 return dev
         return None
 
+    def mroute_init(self, table_id):
+        return self._rpc_call("mroute_init", table_id)
+
+    def mroute_finish(self, table_id):
+        return self._rpc_call("mroute_finish", table_id)
+
+    def mroute_pim_init(self, table_id):
+        return self._rpc_call("mroute_pim_init", table_id)
+
+    def mroute_pim_finish(self, table_id):
+        return self._rpc_call("mroute_pim_init", True, table_id)
+
+    def mroute_add_vif_reg(self, vif_id, table_id):
+        return self._rpc_call("mroute_add_vif_reg", vif_id, table_id)
+
+    def mroute_del_vif_reg(self, vif_id, table_id):
+        return self._rpc_call("mroute_del_vif_reg", vif_id, table_id)
+
+    def mroute_add_mfc(self, group, source, source_vif, out_vifs, table_id):
+        return self._rpc_call("mroute_add_mfc",  group, source, source_vif,
+                              out_vifs, table_id)
+
+    def mroute_add_mfc_proxy(self, group, source, source_vif, out_vifs,
+                             table_id):
+        return self._rpc_call("mroute_add_mfc",  group, source, source_vif,
+                              out_vifs, True, table_id)
+
+    def mroute_del_mfc(self, group, source, source_vif, table_id):
+        return self._rpc_call("mroute_del_mfc",  group, source, source_vif,
+                              table_id)
+
+    def mroute_del_mfc_proxy(self, group, source, source_vif, table_id):
+        return self._rpc_call("mroute_del_mfc",  group, source, source_vif,
+                              True, table_id)
+
+    def mroute_get_notif(self, table_id):
+        return self._rpc_call("mroute_get_notif", table_id)
+
+    def mroute_table(self, index):
+        return self._rpc_call("mroute_table", index)
+
     #
     # Factory methods for constructing interfaces on this machine. The
     # types of interfaces are explained with the classes below.
@@ -595,10 +636,10 @@ class Machine(object):
             return False
         return self._rpc_call("disable_service", service)
 
-    def disable_services(self):
-        for service in self._services:
-            self.disable_service(service)
-        return True
+    def restart_service(self, service):
+        if service not in self._services:
+            self._services.append(service)
+        return self._rpc_call("restart_service", service)
 
     def get_num_cpus(self):
         return self._rpc_call("get_num_cpus")
@@ -636,6 +677,7 @@ class Interface(object):
         self._driver = None
         self._devlink = None
         self._routes = []
+        self._cdata = None
 
     def get_id(self):
         return self._id
@@ -783,6 +825,11 @@ class Interface(object):
                                           self._id)
         return stats
 
+    def link_cpu_ifstat(self):
+        stats = self._machine._rpc_call_x(self._netns, "link_cpu_ifstat",
+                                          self._id)
+        return stats
+
     def set_addresses(self, ips):
         self._addresses = ips
         self._machine._rpc_call_x(self._netns, "set_addresses",
@@ -804,6 +851,14 @@ class Interface(object):
         self._routes+= [(dest, nhs, ipv6)]
         self._machine._rpc_call_x(self._netns, "add_nhs_route",
                                   self._id, dest, nhs, ipv6)
+
+    def mroute_add_vif(self, vif_index, table_id):
+        return self._machine._rpc_call_x(self._netns, "mroute_add_vif",
+                                         self._id, vif_index, table_id)
+
+    def mroute_del_vif(self, vif_index, table_id):
+        return self._machine._rpc_call_x(self._netns, "mroute_del_vif",
+                                         self._id, vif_index, table_id)
 
     def del_nhs_route(self, dest, nhs, ipv6 = False):
         for i, val in enumerate(self._routes):
@@ -966,6 +1021,21 @@ class Interface(object):
         self._machine._rpc_call_x(self._netns, "set_br_state", self._id,
                                   br_state_info)
 
+    def set_br_mcast_snooping(self, set_on):
+        self._machine._rpc_call_x(self._netns, "set_br_mcast_snooping",
+                                  self._id, set_on)
+
+    def set_br_mcast_querier(self, set_on):
+        self._machine._rpc_call_x(self._netns, "set_br_mcast_querier", self._id,
+                                  set_on)
+
+    def set_mcast_flood(self, on):
+        self._machine._rpc_call_x(self._netns, "set_mcast_flood", self._id, on)
+
+    def set_mcast_router(self, state):
+        self._machine._rpc_call_x(self._netns, "set_mcast_router", self._id,
+                                  state)
+
     def set_speed(self, speed):
         self._machine._rpc_call_x(self._netns, "set_speed", self._id, speed)
 
@@ -1004,6 +1074,23 @@ class Interface(object):
 
     def set_pause_off(self):
         return self._machine._rpc_call_x(self._netns, "set_pause_off", self._id)
+
+    def get_coalesce(self):
+        return self._machine._rpc_call_x(self._netns, "get_coalesce", self._id)
+
+    def set_coalesce(self, cdata):
+        return self._machine._rpc_call_x(self._netns, "set_coalesce",
+                    self._id, cdata)
+
+    def save_coalesce(self):
+        self._cdata = self.get_coalesce()
+        return self._cdata
+
+    def restore_coalesce(self):
+        self.set_coalesce(self._cdata)
+        self._cdata = None
+        return None
+
 
 class StaticInterface(Interface):
     """ Static interface

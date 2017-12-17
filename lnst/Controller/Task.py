@@ -321,6 +321,47 @@ class HostAPI(object):
     def get_routes(self, routes_filter = "", netns = None):
         return self._m.get_routes(routes_filter, netns)
 
+    def mroute_init(self, table_id=None):
+        return self._m.mroute_init(table_id)
+
+    def mroute_finish(self, table_id=None):
+        return self._m.mroute_finish(table_id)
+
+    def mroute_pim_init(self, table_id=None):
+        return self._m.mroute_pim_init(table_id)
+
+    def mroute_pim_finish(self, table_id=None):
+        return self._m.mroute_pim_finish(table_id)
+
+    def mroute_table(self, index):
+        return self._m.mroute_table(index)
+
+    def mroute_add_vif_reg(self, vif_id, table_id=None):
+        return self._m.mroute_add_vif_reg(vif_id, table_id)
+
+    def mroute_del_vif_reg(self, vif_id, table_id=None):
+        return self._m.mroute_del_vif_reg(vif_id, table_id)
+
+    def mroute_add_mfc(self, group, source, source_vif, out_vifs,
+                       table_id=None):
+        return self._m.mroute_add_mfc(group, source, source_vif, out_vifs,
+                                      table_id)
+
+    def mroute_add_mfc_proxi(self, group, source, source_vif, out_vifs,
+                             table_id=None):
+        return self._m.mroute_add_mfc_proxi(group, source, source_vif,
+                                            out_vifs, table_id, True)
+
+    def mroute_del_mfc(self, group, source, source_vif, table_id=None):
+        return self._m.mroute_del_mfc(group, source, source_vif, table_id)
+
+    def mroute_del_mfc_proxi(self, group, source, source_vif, table_id=None):
+        return self._m.mroute_del_mfc_proxi(group, source, source_vif,
+                                            table_id, True)
+
+    def mroute_get_notif(self, table_id=None):
+        return self._m.mroute_get_notif(table_id)
+
     @deprecated
     def get_devname(self, if_id):
         """
@@ -495,11 +536,64 @@ class HostAPI(object):
 
         return self._add_iface("vxlan", if_id, netns, ip, options, slaves)
 
+    def create_gre(self, ttl=None, tos=None,
+                   key=None, ikey=None, okey=None,
+                   seq=None, iseq=None, oseq=None,
+                   csum=None, icsum=None, ocsum=None,
+                   ul_iface=None,
+                   local_ip=None, remote_ip=None,
+                   if_id=None, netns=None, ip=None, options={}):
+
+        for v, itag, iv, otag, ov in [(key, "ikey", ikey, "okey", okey),
+                                      (seq, "iseq", iseq, "oseq", oseq),
+                                      (csum, "icsum", icsum, "ocsum", ocsum)]:
+            if v is not None:
+                if iv is not None and iv != v:
+                    raise TaskError("%s is overspecified" % itag)
+                if ov is not None and ov != v:
+                    raise TaskError("%s is overspecified" % otag)
+
+        options.update({"ttl": ttl, "tos": tos,
+                        "key": key, "ikey": ikey, "okey": okey,
+                        "seq": seq, "iseq": iseq, "oseq": oseq,
+                        "csum": csum, "icsum": icsum, "ocsum": ocsum,
+                        "local_ip": local_ip, "remote_ip": remote_ip})
+
+        if ul_iface is not None:
+            slaves = [ul_iface]
+        else:
+            slaves = []
+
+        return self._add_iface("gre", if_id, netns, ip, options, slaves)
+
+    def create_ipip(self, ttl=None, tos=None, ul_iface=None,
+                    local_ip=None, remote_ip=None,
+                    if_id=None, netns=None, ip=None, options={}):
+
+        options.update({"ttl": ttl, "tos": tos,
+                        "local_ip": local_ip, "remote_ip": remote_ip})
+
+        if ul_iface is not None:
+            slaves = [ul_iface]
+        else:
+            slaves = []
+
+        return self._add_iface("ipip", if_id, netns, ip, options, slaves)
+
+    def create_dummy(self, if_id=None, netns=None, ip=None):
+        return self._add_iface("dummy", if_id, netns, ip, {}, [])
+
     def enable_service(self, service):
         return self._m.enable_service(service)
 
     def disable_service(self, service):
         return self._m.disable_service(service)
+
+    def restart_service(self, service):
+        return self._m.restart_service(service)
+
+    def copy_file_to_machine(self, local_path, remote_path=None, netns=None):
+        return self._m.copy_file_to_machine(local_path, remote_path, netns)
 
     def get_num_cpus(self):
         return self._m.get_num_cpus()
@@ -610,6 +704,9 @@ class InterfaceAPI(object):
     def link_stats(self):
         return self._if.link_stats()
 
+    def link_cpu_ifstat(self):
+        return self._if.link_cpu_ifstat()
+
     def set_link_up(self):
         return self._if.set_link_up()
 
@@ -700,6 +797,18 @@ class InterfaceAPI(object):
     def set_br_state(_self, state, self=False, master=False):
         _self._if.set_br_state({"state": state, "self": self, "master": master})
 
+    def set_br_mcast_snooping(_self, set_on = True):
+        _self._if.set_br_mcast_snooping(set_on)
+
+    def set_br_mcast_querier(_self, set_on = True):
+        _self._if.set_br_mcast_querier(set_on)
+
+    def set_mcast_flood(self, on):
+        return self._if.set_mcast_flood(on)
+
+    def set_mcast_router(self, state):
+        return self._if.set_mcast_router(state)
+
     def set_speed(self, speed):
         return self._if.set_speed(speed)
 
@@ -729,6 +838,24 @@ class InterfaceAPI(object):
 
     def set_pause_off(self):
         return self._if.set_pause_off()
+
+    def mroute_add_vif(self, vif_index, table_id=None):
+        return self._if.mroute_add_vif(vif_index, table_id)
+
+    def mroute_del_vif(self, vif_index, table_id=None):
+        return self._if.mroute_del_vif(vif_index, table_id)
+
+    def get_coalesce(self):
+        return self._if.get_coalesce()
+
+    def set_coalesce(self, cdata):
+        return self._if.set_coalesce(cdata)
+
+    def save_coalesce(self):
+        return self._if.save_coalesce()
+
+    def restore_coalesce(self):
+        return self._if.restore_coalesce()
 
 class ModuleAPI(object):
     """ An API class representing a module. """

@@ -83,8 +83,10 @@ class BridgeTool:
                 self = True if re.match(r'.*\s+self', line) else False
                 master = True if re.match(r'.*\s+master', line) else False
                 offload = True if re.match(r'.*\s+offload', line) else False
+                extern_learn = True if re.match(r'.*\s+extern_learn', line) else False
                 br_fdb_info = {"hwaddr": hwaddr, "vlan_id": vlan_id,
-                               "self": self, "master": master, "offload": offload}
+                               "self": self, "master": master, "offload": offload,
+                               "extern_learn": extern_learn}
                 br_fdb_info_list.append(br_fdb_info)
         return br_fdb_info_list
 
@@ -116,4 +118,14 @@ class BridgeTool:
             cmd += " self"
         if br_state_info["master"]:
             cmd += " master"
+        exec_cmd(cmd)
+
+    def set_mcast_snooping(self, set_on = True):
+        cmd = "ip link set %s type bridge mcast_snooping %d" % (self._dev_name,
+                                                                set_on)
+        exec_cmd(cmd)
+
+    def set_mcast_querier(self, set_on = True):
+        cmd = "ip link set %s type bridge mcast_querier %d" % (self._dev_name,
+                                                                set_on)
         exec_cmd(cmd)

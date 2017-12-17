@@ -15,6 +15,7 @@ olichtne@redhat.com (Ondrej Lichtner)
 import re
 import select
 import logging
+import ethtool
 from lnst.Slave.NetConfigDevice import NetConfigDevice
 from lnst.Slave.NetConfigCommon import get_option
 from lnst.Common.NetUtils import normalize_hwaddr
@@ -705,9 +706,38 @@ class Device(object):
                               "tx_collsns": tx_stats[5]})
         return stats
 
+    def link_cpu_ifstat(self):
+        stats = {"devname": self._name,
+                 "hwaddr": self._hwaddr}
+        try:
+            out, _ = exec_cmd("ifstat -x c %s" % self._name)
+        except:
+            return {}
+        lines = iter(out.split("\n"))
+        line_first = ""
+        line_decond = ""
+        for line in lines:
+            if (len(line.split()) == 0):
+                continue
+            if (line.split()[0] == self._name):
+                break
+        else:
+            return {}
+        stats_data = line.split()[1:]
+        for i in range(len(stats_data)):
+            stats_data[i] = stats_data[i].replace("K",  "000")
+            stats_data[i] = stats_data[i].replace("M", "000000")
+
+        stats_data = map(int, stats_data)
+        stats["rx_packets"] = stats_data[0]
+        stats["tx_packets"] = stats_data[2]
+        stats["rx_bytes"] = stats_data[4]
+        stats["tx_bytes"] = stats_data[6]
+        return stats
+
     def set_addresses(self, ips):
         self._conf.set_addresses(ips)
-        exec_cmd("ip addr flush %s" % self._name)
+        exec_cmd("ip addr flush %s scope global" % self._name)
         for address in ips:
             exec_cmd("ip addr add %s dev %s" % (address, self._name))
 
@@ -797,3 +827,29 @@ class Device(object):
     def set_pause_off(self):
         exec_cmd("ethtool -A %s rx off tx off autoneg off" % self._name,
                  die_on_err=False)
+
+    def set_mcast_flood(self, on = True):
+        cmd = "ip link set dev %s type bridge_slave mcast_flood " % self._name
+        if on:
+            cmd += "on"
+        else:
+            cmd += "off"
+        exec_cmd(cmd)
+
+    def set_mcast_router(self, state):
+        cmd = "ip link set dev %s type bridge_slave mcast_router %d" % \
+                   (self._name, state)
+        exec_cmd(cmd)
+
+    def get_coalesce(self):
+        try:
+            return ethtool.get_coalesce(self._name)
+        except IOError as e:
+            logging.error("Failed to get coalesce settings: %s", e)
+            return {}
+
+    def set_coalesce(self, cdata):
+        try:
+            ethtool.set_coalesce(self._name, cdata)
+        except IOError as e:
+            logging.error("Failed to set coalesce settings: %s", e)
